@@ -67,22 +67,43 @@ audit chain verifying, then failing after tampering.
 src/sentryops/
   warrant.py        signed approval warrants  (mint = operator, verify = boundary)
   audit.py          HMAC-chained tamper-evident trail
-  splunk_mcp.py     the MCP boundary: structured Splunk tools + the gated write tool
+  splunk_mcp.py     the MCP boundary: structured tools + gated write tool + SyntheticBackend
+  splunk_live.py    LiveSplunkBackend — real Splunk MCP Server client (optional)
   orchestrator.py   autonomous triage loop (holds no operator key)
   operator.py       human approval side (mints warrants)
   fixtures/         synthetic incident — no real hosts, customers, or schemas
 ui/approval_gate.html   operator approval surface (Web Crypto HMAC, matches Python)
 demo/run_demo.py        end-to-end narrated demo
 tests/test_gate.py      security-property tests
+connect_check.py        validates the live Splunk MCP path against your tenant
 architecture_diagram.md required architecture diagram
 ```
 
-## Production integration
+## Production integration (real Splunk MCP Server)
 
-The demo backs the Splunk surfaces with synthetic fixtures so it runs without a
-tenant. Wiring to a real Splunk Enterprise/Cloud trial + Developer License is
-isolated to the documented integration points in `src/sentryops/splunk_mcp.py`
-(see the commented `splunk-sdk` / `mcp` deps in `requirements.txt`).
+The boundary is backend-pluggable. The demo uses `SyntheticBackend` (bundled
+fixtures, zero setup). For a real tenant, pass `LiveSplunkBackend` — a stdlib MCP
+client (`src/sentryops/splunk_live.py`) that talks to the **Splunk MCP Server**
+(Splunkbase 7931) over JSON-RPC, with `splunk_run_query`, `ask_splunk_question`
+(Hosted Models), and `generate_spl` (AI Assistant) mapped to the same five tools
+the agent already calls. **No agent, warrant, or audit code changes** between
+demo and tenant:
+
+```python
+from sentryops.splunk_live import LiveSplunkBackend
+boundary = SplunkMCPBoundary(fixtures={}, audit=audit, _operator_key=key,
+                             clock=clock, backend=LiveSplunkBackend(url, token))
+```
+
+Validate the live path against your instance:
+
+```bash
+cp .env.example .env   # set SPLUNK_MCP_URL + SPLUNK_MCP_TOKEN
+python connect_check.py    # lists the server's real tools + runs a probe query
+```
+
+The live path is wired but not exercised in the demo (no credentials handled
+here); `connect_check.py` confirms tool names against your server.
 
 ## License
 

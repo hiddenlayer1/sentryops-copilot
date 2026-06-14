@@ -1,13 +1,14 @@
 """The Splunk MCP boundary — the agent's only interface to the world.
 
-In production these methods are thin wrappers over the **Splunk MCP Server**
-(search, metric aggregation, service dependencies), **Splunk Hosted Models**
-(anomaly scoring), and the **Splunk AI Assistant** (SPL generation). For the
-zero-install demo they are backed by the synthetic fixtures in ``fixtures/`` so
-the architecture can be evaluated without a live Splunk tenant. Each method is
-marked with the real surface it stands in for.
+The boundary exposes structured tools over a pluggable **backend**:
 
-Two boundary properties matter for judging:
+* ``SyntheticBackend`` (default) serves the bundled fixtures so the demo and
+  tests run with zero external setup.
+* ``LiveSplunkBackend`` (see ``splunk_live.py``) talks to a real Splunk MCP
+  Server / Hosted Models / AI Assistant. Selecting it changes **no** agent,
+  warrant, or audit code — only where the read data comes from.
+
+Two boundary properties matter for judging, and hold regardless of backend:
 
 1. **No fabricated findings.** Every read tool returns an ``evidence_count``.
    The orchestrator is contractually forbidden from emitting a finding when
@@ -20,7 +21,7 @@ Two boundary properties matter for judging:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .audit import AuditChain
 from .warrant import Warrant, verify_warrant
@@ -28,6 +29,38 @@ from .warrant import Warrant, verify_warrant
 
 class ApprovalRequired(Exception):
     """Raised when execute_remediation is called without a valid warrant."""
+
+
+class Backend(Protocol):
+    """Where read data comes from. Implemented by Synthetic + Live backends."""
+
+    def search(self, spl: str) -> list[dict[str, Any]]: ...
+    def metric_aggregation(self, metric: str) -> dict[str, Any]: ...
+    def service_dependencies(self, service: str) -> list[str]: ...
+    def anomaly_score(self, events: list[dict[str, Any]]) -> float: ...
+    def generate_spl(self, nl_request: str) -> str: ...
+
+
+@dataclass
+class SyntheticBackend:
+    """Deterministic backend over the bundled synthetic incident fixtures."""
+
+    fixtures: dict[str, Any]
+
+    def search(self, spl: str) -> list[dict[str, Any]]:
+        return self.fixtures.get("events", [])
+
+    def metric_aggregation(self, metric: str) -> dict[str, Any]:
+        return self.fixtures.get("metrics", {}).get(metric, {})
+
+    def service_dependencies(self, service: str) -> list[str]:
+        return self.fixtures.get("service_map", {}).get(service, [])
+
+    def anomaly_score(self, events: list[dict[str, Any]]) -> float:
+        return self.fixtures.get("hosted_model_score", 0.0) if events else 0.0
+
+    def generate_spl(self, nl_request: str) -> str:
+        return self.fixtures.get("spl_for", {}).get(nl_request, "search index=* | head 100")
 
 
 @dataclass
@@ -56,25 +89,26 @@ class SplunkMCPBoundary:
     audit: AuditChain
     _operator_key: bytes
     clock: Callable[[], str]
+    backend: Backend | None = None
     executed: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._backend: Backend = self.backend or SyntheticBackend(self.fixtures)
 
     # ---- Splunk MCP Server: read tools --------------------------------------
     def search(self, spl: str) -> ToolResult:
-        """Stand-in for the Splunk MCP Server `search` tool."""
-        events = self.fixtures.get("events", [])
+        events = self._backend.search(spl)
         self.audit.append("mcp.search", {"spl": spl, "hits": len(events)}, self.clock())
         return ToolResult("splunk.search", events, evidence_count=len(events))
 
     def metric_aggregation(self, metric: str) -> ToolResult:
-        """Stand-in for the Splunk MCP Server `metrics` tool."""
-        agg = self.fixtures.get("metrics", {}).get(metric, {})
+        agg = self._backend.metric_aggregation(metric)
         n = len(agg) if isinstance(agg, dict) else 0
         self.audit.append("mcp.metrics", {"metric": metric, "buckets": n}, self.clock())
         return ToolResult("splunk.metrics", agg, evidence_count=n)
 
     def service_dependencies(self, service: str) -> ToolResult:
-        """Stand-in for the Splunk MCP Server `service_map` tool."""
-        deps = self.fixtures.get("service_map", {}).get(service, [])
+        deps = self._backend.service_dependencies(service)
         self.audit.append("mcp.service_map", {"service": service, "deps": len(deps)}, self.clock())
         return ToolResult("splunk.service_map", deps, evidence_count=len(deps))
 
@@ -83,16 +117,16 @@ class SplunkMCPBoundary:
         """Stand-in for a Splunk Hosted Model scoring endpoint.
 
         The agent does NOT compute the score itself; it submits events and
-        reasons over the returned confidence. Demo scorer is deterministic.
+        reasons over the returned confidence.
         """
-        score = self.fixtures.get("hosted_model_score", 0.0) if events else 0.0
+        score = self._backend.anomaly_score(events)
         self.audit.append("hosted_model.score", {"n": len(events), "score": score}, self.clock())
         return ToolResult("splunk.hosted_model", {"confidence": score}, evidence_count=1 if events else 0)
 
     # ---- Splunk AI Assistant ------------------------------------------------
     def generate_spl(self, nl_request: str) -> ToolResult:
         """Stand-in for the Splunk AI Assistant natural-language → SPL tool."""
-        spl = self.fixtures.get("spl_for", {}).get(nl_request, "search index=* | head 100")
+        spl = self._backend.generate_spl(nl_request)
         self.audit.append("ai_assistant.spl", {"request": nl_request, "spl": spl}, self.clock())
         return ToolResult("splunk.ai_assistant", spl, evidence_count=1)
 
