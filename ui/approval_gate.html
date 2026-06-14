@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SentryOps Copilot — Operator Approval Gate</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 15px/1.5 ui-monospace, "Cascadia Code", Menlo, monospace;
+         background: #0f172a; color: #e2e8f0; padding: 2rem; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  .sub { color: #94a3b8; margin: 0 0 1.5rem; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+          padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+  .k { color: #38bdf8; } .danger { color: #f87171; } .ok { color: #4ade80; }
+  pre { background: #0b1220; border: 1px solid #233; border-radius: 8px;
+        padding: .9rem; overflow:auto; white-space: pre-wrap; word-break: break-all; }
+  button { background: #2563eb; color: white; border: 0; border-radius: 8px;
+           padding: .7rem 1.4rem; font: inherit; cursor: pointer; }
+  button:disabled { background:#475569; cursor:not-allowed; }
+  .note { color:#64748b; font-size:.8rem; }
+  label { display:block; color:#94a3b8; margin:.5rem 0 .2rem; }
+  input { width:100%; box-sizing:border-box; background:#0b1220; color:#e2e8f0;
+          border:1px solid #334155; border-radius:6px; padding:.45rem; font:inherit; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SentryOps Copilot — Operator Approval Gate</h1>
+  <p class="sub">The agent proposed an action. Nothing executes until a human mints a signed warrant here.</p>
+
+  <div class="card">
+    <div class="k">PROPOSED ACTION (from the orchestrator)</div>
+    <pre id="action"></pre>
+    <label>Operator ID</label>
+    <input id="operator" value="ops.alice" />
+    <p style="margin-top:1rem">
+      <button id="approve">Review complete — Approve &amp; mint warrant</button>
+    </p>
+    <p class="note">Demo signs with a shared <code>DEMO-OPERATOR-KEY</code>. In production the
+      operator key lives only in this approval surface and the MCP boundary — never in the agent.</p>
+  </div>
+
+  <div class="card" id="out" style="display:none">
+    <div class="ok">SIGNED WARRANT (paste into the boundary to authorize this one action)</div>
+    <pre id="warrant"></pre>
+    <div class="danger">Without this warrant, <code>execute_remediation</code> raises ApprovalRequired.</div>
+  </div>
+</div>
+
+<script>
+// Mirrors src/sentryops/warrant.py exactly: canonical JSON (sorted keys, compact)
+// HMAC-SHA256 over {action, operator_id, issued_at, nonce}.
+const DEMO_OPERATOR_KEY = "DEMO-OPERATOR-KEY-not-for-production";
+
+const PROPOSED = {
+  action_id: "act-ALRT-2026-0614-int-synth-001",
+  kind: "isolate_host",
+  target: "billing-api-07",
+  reason: "Correlated 4 events on billing-api-07; anomaly confidence 0.92."
+};
+document.getElementById("action").textContent = JSON.stringify(PROPOSED, null, 2);
+
+function canonical(o){
+  if (o === null || typeof o !== "object") return JSON.stringify(o);
+  if (Array.isArray(o)) return "[" + o.map(canonical).join(",") + "]";
+  return "{" + Object.keys(o).sort()
+    .map(k => JSON.stringify(k) + ":" + canonical(o[k])).join(",") + "}";
+}
+function toHex(buf){
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function hmac(keyStr, msgStr){
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(keyStr), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return toHex(await crypto.subtle.sign("HMAC", key, enc.encode(msgStr)));
+}
+
+let nonceSeq = 0;
+document.getElementById("approve").addEventListener("click", async () => {
+  const operator_id = document.getElementById("operator").value.trim() || "ops.unknown";
+  nonceSeq += 1;
+  const issued_at = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  const nonce = `${operator_id}-${nonceSeq}`;
+  const material = canonical({ action: PROPOSED, operator_id, issued_at, nonce });
+  const signature = await hmac(DEMO_OPERATOR_KEY, material);
+  const warrant = { action_id: PROPOSED.action_id, operator_id, issued_at, nonce, signature };
+  document.getElementById("warrant").textContent = JSON.stringify(warrant, null, 2);
+  document.getElementById("out").style.display = "block";
+});
+</script>
+</body>
+</html>

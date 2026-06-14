@@ -1,0 +1,25 @@
+{
+  "_note": "Fully synthetic incident for evaluation. No real hosts, customers, or schemas.",
+  "alert": {
+    "alert_id": "ALRT-2026-0614-int-synth-001",
+    "description": "possible credential-stuffing then lateral movement on billing-api-07",
+    "service": "billing-api-07",
+    "recommended_action": "isolate_host"
+  },
+  "spl_for": {
+    "possible credential-stuffing then lateral movement on billing-api-07": "search index=auth sourcetype=login action=failure host=billing-api-07 | stats count by src_ip, user | where count > 25"
+  },
+  "events": [
+    {"ts": "2026-06-14T16:41:02Z", "src_ip": "10.4.7.12", "user": "svc_batch", "action": "login_failure", "count": 41},
+    {"ts": "2026-06-14T16:42:55Z", "src_ip": "10.4.7.12", "user": "svc_batch", "action": "login_success", "note": "after 41 failures"},
+    {"ts": "2026-06-14T16:43:10Z", "src_ip": "10.4.7.12", "user": "svc_batch", "action": "smb_connect", "dst": "payments-db"},
+    {"ts": "2026-06-14T16:43:48Z", "src_ip": "10.4.7.12", "user": "svc_batch", "action": "priv_escalation_attempt", "dst": "ledger-worker"}
+  ],
+  "metrics": {
+    "auth_failure_rate": {"baseline_per_min": 2, "observed_per_min": 41, "zscore": 8.7}
+  },
+  "service_map": {
+    "billing-api-07": ["payments-db", "auth-svc", "ledger-worker"]
+  },
+  "hosted_model_score": 0.92
+}

@@ -1,0 +1,13 @@
+# SentryOps Copilot — runtime dependencies
+#
+# The demo runs on the Python 3.10+ standard library ONLY (hmac, hashlib,
+# json, dataclasses). No third-party packages are required to run the demo
+# against the bundled synthetic fixtures.
+#
+# The production integration points (see src/sentryops/splunk_mcp.py) talk to
+# the real Splunk MCP Server / Hosted Models over MCP; wiring those up adds the
+# Splunk SDK below. They are intentionally NOT imported by the demo so the
+# evaluation path stays zero-install.
+
+# splunk-sdk>=2.0        # real Splunk Enterprise / Cloud REST + search
+# mcp>=1.2               # Model Context Protocol client for the Splunk MCP Server

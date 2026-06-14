@@ -1,0 +1,132 @@
+"""The Splunk MCP boundary — the agent's only interface to the world.
+
+In production these methods are thin wrappers over the **Splunk MCP Server**
+(search, metric aggregation, service dependencies), **Splunk Hosted Models**
+(anomaly scoring), and the **Splunk AI Assistant** (SPL generation). For the
+zero-install demo they are backed by the synthetic fixtures in ``fixtures/`` so
+the architecture can be evaluated without a live Splunk tenant. Each method is
+marked with the real surface it stands in for.
+
+Two boundary properties matter for judging:
+
+1. **No fabricated findings.** Every read tool returns an ``evidence_count``.
+   The orchestrator is contractually forbidden from emitting a finding when
+   ``evidence_count == 0`` — the constraint lives in the tool schema, not a
+   prompt.
+2. **No unapproved actions.** ``execute_remediation`` verifies a signed
+   :class:`~sentryops.warrant.Warrant` before doing anything. The boundary
+   holds the operator key; the orchestrator does not.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from .audit import AuditChain
+from .warrant import Warrant, verify_warrant
+
+
+class ApprovalRequired(Exception):
+    """Raised when execute_remediation is called without a valid warrant."""
+
+
+@dataclass
+class ToolResult:
+    """Structured response. ``evidence_count`` is load-bearing, not cosmetic."""
+
+    tool: str
+    data: Any
+    evidence_count: int
+
+    @property
+    def evidence_available(self) -> bool:
+        return self.evidence_count > 0
+
+
+@dataclass
+class SplunkMCPBoundary:
+    """The structured surface the orchestrator is allowed to touch.
+
+    ``_operator_key`` is private to the boundary (and shared only with the human
+    operator's approval UI). It is never passed to the orchestrator, which is
+    why a prompt injection cannot make the agent mint its own warrant.
+    """
+
+    fixtures: dict[str, Any]
+    audit: AuditChain
+    _operator_key: bytes
+    clock: Callable[[], str]
+    executed: list[dict[str, Any]] = field(default_factory=list)
+
+    # ---- Splunk MCP Server: read tools --------------------------------------
+    def search(self, spl: str) -> ToolResult:
+        """Stand-in for the Splunk MCP Server `search` tool."""
+        events = self.fixtures.get("events", [])
+        self.audit.append("mcp.search", {"spl": spl, "hits": len(events)}, self.clock())
+        return ToolResult("splunk.search", events, evidence_count=len(events))
+
+    def metric_aggregation(self, metric: str) -> ToolResult:
+        """Stand-in for the Splunk MCP Server `metrics` tool."""
+        agg = self.fixtures.get("metrics", {}).get(metric, {})
+        n = len(agg) if isinstance(agg, dict) else 0
+        self.audit.append("mcp.metrics", {"metric": metric, "buckets": n}, self.clock())
+        return ToolResult("splunk.metrics", agg, evidence_count=n)
+
+    def service_dependencies(self, service: str) -> ToolResult:
+        """Stand-in for the Splunk MCP Server `service_map` tool."""
+        deps = self.fixtures.get("service_map", {}).get(service, [])
+        self.audit.append("mcp.service_map", {"service": service, "deps": len(deps)}, self.clock())
+        return ToolResult("splunk.service_map", deps, evidence_count=len(deps))
+
+    # ---- Splunk Hosted Models -----------------------------------------------
+    def anomaly_score(self, events: list[dict[str, Any]]) -> ToolResult:
+        """Stand-in for a Splunk Hosted Model scoring endpoint.
+
+        The agent does NOT compute the score itself; it submits events and
+        reasons over the returned confidence. Demo scorer is deterministic.
+        """
+        score = self.fixtures.get("hosted_model_score", 0.0) if events else 0.0
+        self.audit.append("hosted_model.score", {"n": len(events), "score": score}, self.clock())
+        return ToolResult("splunk.hosted_model", {"confidence": score}, evidence_count=1 if events else 0)
+
+    # ---- Splunk AI Assistant ------------------------------------------------
+    def generate_spl(self, nl_request: str) -> ToolResult:
+        """Stand-in for the Splunk AI Assistant natural-language → SPL tool."""
+        spl = self.fixtures.get("spl_for", {}).get(nl_request, "search index=* | head 100")
+        self.audit.append("ai_assistant.spl", {"request": nl_request, "spl": spl}, self.clock())
+        return ToolResult("splunk.ai_assistant", spl, evidence_count=1)
+
+    # ---- The gated write tool ----------------------------------------------
+    def propose_remediation(self, finding: dict[str, Any]) -> dict[str, Any]:
+        """Build an action proposal. This does NOT execute anything."""
+        action = {
+            "action_id": f"act-{finding.get('finding_id', 'unknown')}",
+            "kind": finding.get("recommended_action", "isolate_host"),
+            "target": finding.get("target", "unknown"),
+            "reason": finding.get("summary", ""),
+        }
+        self.audit.append("remediation.proposed", action, self.clock())
+        return action
+
+    def execute_remediation(self, action: dict[str, Any], warrant: Warrant | None) -> dict[str, Any]:
+        """The only state-changing tool. Refuses to act without a valid warrant.
+
+        This is the structural human-in-the-loop gate. There is no ``force`` flag
+        and no prompt that bypasses it — verification is a cryptographic check.
+        """
+        if not verify_warrant(self._operator_key, action, warrant):
+            self.audit.append(
+                "remediation.denied",
+                {"action_id": action.get("action_id"), "reason": "missing_or_invalid_warrant"},
+                self.clock(),
+            )
+            raise ApprovalRequired(
+                f"Action {action.get('action_id')} requires a valid operator warrant."
+            )
+        self.executed.append(action)
+        self.audit.append(
+            "remediation.executed",
+            {"action_id": action.get("action_id"), "operator_id": warrant.operator_id},
+            self.clock(),
+        )
+        return {"status": "executed", "action": action, "operator_id": warrant.operator_id}
