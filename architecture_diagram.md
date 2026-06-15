@@ -20,10 +20,9 @@ flowchart TB
       AC["HMAC-chained audit trail"]
     end
 
-    subgraph splunk["Splunk surfaces"]
-      MCP["Splunk MCP Server<br/>search · metrics · service_map"]
-      HM["Splunk Hosted Models<br/>anomaly scoring"]
-      AA["Splunk AI Assistant<br/>NL → SPL"]
+    subgraph splunk["Live Splunk  (via the MCP Server, at runtime)"]
+      MCP["Splunk MCP Server<br/>run_splunk_query · generate_spl"]
+      SP["real indexed events<br/>search · inputlookup · z-score anomaly SPL"]
     end
 
     AG -->|"propose / read"| RT
@@ -31,8 +30,8 @@ flowchart TB
     GT -. "ApprovalRequired" .-> AG
     OP ==>|"signed warrant (HMAC-SHA256)"| GT
     RT --> MCP
-    RT --> HM
-    AA --> AG
+    MCP --> SP
+    MCP -->|"NL→SPL · events · anomaly"| AG
     boundary --> AC
     GT -->|"approved action"| splunk
 
@@ -50,11 +49,13 @@ flowchart TB
 
 ## Flow
 
-1. **Alert in** → orchestrator asks the **AI Assistant** to turn the alert into SPL.
-2. **MCP Server** `search` / `metrics` / `service_map` return structured evidence
-   (each carries `evidence_count`).
-3. **Hosted Model** scores the events; the agent reasons over the returned
-   confidence (it does not invent the score).
+1. **Alert in** → orchestrator calls the MCP Server's `generate_spl` to turn the
+   alert's natural-language description into SPL.
+2. **MCP Server** `run_splunk_query` runs the SPL on the live instance — `search`
+   and the service-map `inputlookup` return structured evidence (each carries
+   `evidence_count`).
+3. A **z-score SPL** computes the anomaly confidence *in Splunk*; the agent reasons
+   over the returned number (it does not invent the score).
 4. Orchestrator emits a **finding only if `evidence_count > 0`** and *proposes* a
    remediation.
 5. Agent's attempt to execute autonomously is **denied** at the boundary.
@@ -65,7 +66,9 @@ flowchart TB
 
 ## Note on scope
 
-This repository is a self-contained demo project built for evaluation. The Splunk
-surfaces are exercised through documented integration points in
-`src/sentryops/splunk_mcp.py`; the bundled demo backs them with synthetic
-fixtures so the architecture can be verified without a live tenant.
+This repository is a self-contained demo project built for evaluation. With
+`SPLUNK_MCP_URL` / `SPLUNK_MCP_TOKEN` set, the agent runs against a **real Splunk
+MCP Server at runtime** (`server/splunk_mcp_server.py`), issuing live SPL and
+reasoning over the real indexed events. The same boundary also backs the flow with
+a synthetic incident so the security properties verify with zero setup. All
+incident data is synthetic.

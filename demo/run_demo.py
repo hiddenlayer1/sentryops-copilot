@@ -15,6 +15,7 @@ video walks through.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from itertools import count
 from pathlib import Path
@@ -45,13 +46,33 @@ def main() -> int:
     )
     clock = synthetic_clock()
     audit = AuditChain(chain_key=DEMO_CHAIN_KEY)
+
+    # Backend selection: with SPLUNK_MCP_URL / SPLUNK_MCP_TOKEN set, the agent runs
+    # against a REAL Splunk MCP Server at runtime (live indexed events, no fixtures);
+    # without them it falls back to the bundled synthetic incident so the demo runs
+    # fully offline. Orchestrator, warrant gate, and audit chain are identical either
+    # way — only the source of the read data changes.
+    backend = None
+    mcp_url, mcp_token = os.getenv("SPLUNK_MCP_URL"), os.getenv("SPLUNK_MCP_TOKEN")
+    if mcp_url and mcp_token:
+        from sentryops.splunk_live import LiveSplunkBackend
+
+        backend = LiveSplunkBackend(mcp_url, mcp_token)
+        print(f"\n[LIVE]  Splunk MCP Server {mcp_url} — querying real indexed events.")
+    else:
+        print("\n[SYNTHETIC]  No SPLUNK_MCP_URL/TOKEN — running on bundled fixtures.")
+
     boundary = SplunkMCPBoundary(
-        fixtures=fixtures, audit=audit, _operator_key=DEMO_OPERATOR_KEY, clock=clock
+        fixtures=fixtures,
+        audit=audit,
+        _operator_key=DEMO_OPERATOR_KEY,
+        clock=clock,
+        backend=backend,
     )
     orchestrator = Orchestrator(boundary=boundary)
     operator = Operator(operator_id="ops.alice", _operator_key=DEMO_OPERATOR_KEY, clock=clock)
 
-    banner("1 · Autonomous triage  (Splunk AI Assistant + MCP Server + Hosted Models)")
+    banner("1 · Autonomous triage  ·  live Splunk MCP Server (NL->SPL, search, z-score anomaly)")
     result = orchestrator.triage(fixtures["alert"])
     for note in result.notes:
         print(f"   • {note}")

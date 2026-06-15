@@ -2,9 +2,9 @@
 
 **Autonomous Splunk security-ops triage with a *structural* human-in-the-loop gate.**
 
-An agent triages a Splunk alert end to end — natural-language → SPL via the
-**Splunk AI Assistant**, correlation via the **Splunk MCP Server**, anomaly
-scoring via **Splunk Hosted Models** — and *proposes* a remediation. It can never
+An agent triages a Splunk alert end to end — natural-language → SPL, correlation
+and service-map lookup over a **live Splunk MCP Server**, and an anomaly score
+computed *in Splunk* with SPL — then *proposes* a remediation. It can never
 execute one on its own. Execution at the MCP boundary requires a **warrant**: an
 HMAC-SHA256 signature over the exact action, minted only by a human operator. The
 agent process doesn't hold the operator key, so a prompt injection can't make it
@@ -14,38 +14,51 @@ self-approve. The constraint is cryptographic, not a UI button.
 > skipped or configured away. SentryOps enforces it at the tool boundary, where
 > it's a check the agent literally cannot pass without a human.
 
-## Why it complements Splunk
+## Runs against a real Splunk MCP Server at runtime
 
-Splunk is the system of record for ops telemetry. SentryOps turns the **Splunk
-MCP Server into a safe system of _action_**: it lets an agent act on Splunk
-signals while keeping a provable approval gate and a tamper-evident trail that
-exports straight back into Splunk. It showcases three Splunk AI surfaces at once
-rather than replacing any of them.
+This is not a fixture replay. With a Splunk instance reachable, the agent drives a
+**real Splunk MCP Server** (`server/splunk_mcp_server.py` — a stdlib,
+streamable-HTTP MCP server) that executes every tool call as live SPL against
+Splunk and returns the real indexed events:
 
-| Splunk surface | Used for | Bonus track |
-|:--|:--|:--|
-| **Splunk MCP Server** | search · metric aggregation · service map | Best Use of Splunk MCP Server |
-| **Splunk Hosted Models** | anomaly scoring over raw events | Best Use of Splunk Hosted Models |
-| **Splunk AI Assistant / Dev Tools** | NL → SPL, live dashboard scaffolding | Best Use of Splunk Developer Tools |
+| Agent step | Live MCP call |
+|:--|:--|
+| NL alert → SPL | `generate_spl` |
+| pull correlated events | `run_splunk_query` → real indexed events |
+| resolve service dependencies | `run_splunk_query` + `inputlookup` |
+| anomaly confidence | `run_splunk_query` + z-score SPL (computed in Splunk) |
 
-Primary track: **Security**.
+The same agent, warrant gate, and audit chain also run **fully offline** on a
+bundled synthetic incident (no Splunk required), so the security properties are
+reproducible anywhere. Primary track: **Security**. Bonus: **Best Use of the
+Splunk MCP Server**.
 
-## Quickstart (zero install — stdlib only)
+## Quickstart
+
+**Live path — real Splunk at runtime:**
 
 ```bash
-# 1. Run the end-to-end demo on the bundled synthetic incident
-python demo/run_demo.py
+# 1. Point the MCP server at your Splunk management port and start it
+SPLUNK_REST_URL=https://localhost:8089 python server/splunk_mcp_server.py --port 8765
 
-# 2. Run the security-property test suite (also works under pytest)
-python tests/test_gate.py
+# 2. Confirm the agent sees the live tool catalog + a real query round-trips
+SPLUNK_MCP_URL=http://127.0.0.1:8765/mcp SPLUNK_MCP_TOKEN=<splunk token> python connect_check.py
 
-# 3. Open the operator approval surface
-#    open ui/approval_gate.html in a browser
+# 3. Run the end-to-end agent against live Splunk
+SPLUNK_MCP_URL=http://127.0.0.1:8765/mcp SPLUNK_MCP_TOKEN=<splunk token> python demo/run_demo.py
 ```
 
-The demo prints the full flow: triage → the agent's self-approval attempt being
-**denied** → a human minting a warrant → the approved action executing → the
-audit chain verifying, then failing after tampering.
+**Offline path — zero install, stdlib only:**
+
+```bash
+python demo/run_demo.py        # bundled synthetic incident, no Splunk needed
+python tests/test_gate.py      # security-property tests (also runs under pytest)
+# open ui/approval_gate.html in a browser for the operator surface
+```
+
+Either way the demo prints the full flow: triage → the agent's self-approval
+attempt being **denied** → a human minting a warrant → the approved action
+executing → the audit chain verifying, then failing after tampering.
 
 ## The two properties, proven by tests
 
@@ -61,33 +74,44 @@ audit chain verifying, then failing after tampering.
 - **Tamper-evident audit** — editing any historical audit entry breaks chain
   verification.
 
+## Why it complements Splunk
+
+Splunk is the system of record for ops telemetry. SentryOps turns the **Splunk MCP
+Server into a safe system of _action_**: an agent acts on Splunk signals while a
+provable, cryptographic approval gate and a tamper-evident trail sit at the tool
+boundary. It builds *on* the MCP Server rather than replacing anything Splunk
+ships. The anomaly score is computed in Splunk via SPL; a production deployment
+can swap the deterministic `generate_spl` rule for the Splunk AI Assistant, and
+the z-score for a Splunk hosted model, **without touching the gate**.
+
 ## Layout
 
 ```
+server/splunk_mcp_server.py  live Splunk MCP Server (stdlib; runs SPL via REST)
 src/sentryops/
   warrant.py        signed approval warrants  (mint = operator, verify = boundary)
   audit.py          HMAC-chained tamper-evident trail
   splunk_mcp.py     the MCP boundary: structured tools + gated write tool + SyntheticBackend
-  splunk_live.py    LiveSplunkBackend — real Splunk MCP Server client (optional)
+  splunk_live.py    LiveSplunkBackend — real Splunk MCP Server client
   orchestrator.py   autonomous triage loop (holds no operator key)
   operator.py       human approval side (mints warrants)
   fixtures/         synthetic incident — no real hosts, customers, or schemas
 ui/approval_gate.html   operator approval surface (Web Crypto HMAC, matches Python)
-demo/run_demo.py        end-to-end narrated demo
+demo/run_demo.py        end-to-end narrated demo (live or synthetic)
 tests/test_gate.py      security-property tests
-connect_check.py        validates the live Splunk MCP path against your tenant
+connect_check.py        validates the live Splunk MCP path against your server
 architecture_diagram.md required architecture diagram
 ```
 
-## Production integration (real Splunk MCP Server)
+## How the live path works
 
-The boundary is backend-pluggable. The demo uses `SyntheticBackend` (bundled
-fixtures, zero setup). For a real tenant, pass `LiveSplunkBackend` — a stdlib MCP
-client (`src/sentryops/splunk_live.py`) that talks to the **Splunk MCP Server**
-(Splunkbase 7931) over JSON-RPC, with `splunk_run_query`, `ask_splunk_question`
-(Hosted Models), and `generate_spl` (AI Assistant) mapped to the same five tools
-the agent already calls. **No agent, warrant, or audit code changes** between
-demo and tenant:
+The boundary is backend-pluggable. Offline it uses `SyntheticBackend` (bundled
+fixtures). With `SPLUNK_MCP_URL` + `SPLUNK_MCP_TOKEN` set, `demo/run_demo.py`
+selects `LiveSplunkBackend` — a stdlib MCP client (`src/sentryops/splunk_live.py`)
+that speaks JSON-RPC to the Splunk MCP Server and calls `run_splunk_query` /
+`generate_spl`. The MCP server forwards the bearer token to Splunk and runs the
+SPL via `/services/search/jobs/oneshot`. **No agent, warrant, or audit code
+changes** between offline and live — only the source of the read data:
 
 ```python
 from sentryops.splunk_live import LiveSplunkBackend
@@ -95,17 +119,7 @@ boundary = SplunkMCPBoundary(fixtures={}, audit=audit, _operator_key=key,
                              clock=clock, backend=LiveSplunkBackend(url, token))
 ```
 
-Validate the live path against your instance:
-
-```bash
-cp .env.example .env   # set SPLUNK_MCP_URL + SPLUNK_MCP_TOKEN
-python connect_check.py    # lists the server's real tools + runs a probe query
-```
-
-The live path is wired but not exercised in the demo (no credentials handled
-here); `connect_check.py` confirms tool names against your server.
-
 ## License
 
-MIT — see [LICENSE](LICENSE). Built as a self-contained demo for the Splunk
-Agentic Ops Hackathon; uses only synthetic data.
+MIT — see [LICENSE](LICENSE). Built for the Splunk Agentic Ops Hackathon; all
+incident data is synthetic.

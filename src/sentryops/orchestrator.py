@@ -34,7 +34,7 @@ class Orchestrator:
 
         # 1. Splunk AI Assistant: natural-language alert -> SPL
         spl = self.boundary.generate_spl(alert["description"]).data
-        notes.append(f"AI Assistant generated SPL: {spl}")
+        notes.append(f"Splunk MCP NL->SPL generated: {spl}")
 
         # 2. Splunk MCP Server: pull correlated events
         search = self.boundary.search(spl)
@@ -51,7 +51,7 @@ class Orchestrator:
 
         # 4. Splunk Hosted Model: anomaly confidence over the raw events
         score = self.boundary.anomaly_score(search.data).data["confidence"]
-        notes.append(f"Hosted Model anomaly confidence: {score:.2f}")
+        notes.append(f"Splunk SPL anomaly score (z-score): {score:.2f}")
 
         # 5. Assemble a traceable finding
         finding = {
